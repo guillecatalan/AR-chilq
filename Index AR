@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>CCTA · Gaussian Splat</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#08101c;color:#fff}
+#panel{position:fixed;z-index:20;left:50%;top:50%;transform:translate(-50%,-50%);width:min(460px,calc(100% - 32px));padding:26px;border:1px solid #29344d;border-radius:22px;background:rgba(12,20,35,.96);box-shadow:0 24px 80px #0008}
+h1{margin:0 0 8px;font-size:30px}.muted{color:#aab6ce;line-height:1.5}.badge{font-size:12px;font-weight:800;color:#dce6ff;background:#202c46;padding:6px 10px;border-radius:99px;display:inline-block;margin-bottom:12px}
+button{width:100%;border:0;border-radius:13px;padding:15px;margin-top:10px;font-weight:800;font-size:16px;cursor:pointer;background:#fff;color:#07101d}
+button.secondary{background:#202c46;color:#fff}.status{margin-top:14px;font-size:13px;color:#b7c3da;white-space:pre-wrap}
+#progress{height:5px;border-radius:5px;background:#202c46;overflow:hidden;margin-top:14px;display:none}#bar{height:100%;width:0;background:#fff}
+#ar{display:none}
+#help{position:fixed;z-index:30;left:50%;bottom:24px;transform:translateX(-50%);padding:11px 15px;border-radius:99px;background:#000b;white-space:nowrap;font-size:13px}
+</style>
+</head>
+<body>
+<div id="panel">
+  <span class="badge">CCTA · WEBAR</span>
+  <h1>Modelo CCTA</h1>
+  <p class="muted">Primero probaremos que el Gaussian Splat carga correctamente. Después activaremos realidad aumentada.</p>
+  <button id="view3d">PROBAR MODELO 3D</button>
+  <button id="ar" class="secondary">VER EN REALIDAD AUMENTADA</button>
+  <div id="progress"><div id="bar"></div></div>
+  <div id="status">Listo.</div>
+</div>
+<div id="help">Arrastra para girar · rueda/pellizco para acercar</div>
+
+<script type="importmap">
+{"imports":{
+ "three":"https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js",
+ "@mkkellogg/gaussian-splats-3d":"https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
+}}
+</script>
+
+<script type="module">
+import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
+
+const MODEL='./assets/Ccta.splat';
+const panel=document.querySelector('#panel');
+const status=document.querySelector('#status');
+const progress=document.querySelector('#progress');
+const bar=document.querySelector('#bar');
+const view3d=document.querySelector('#view3d');
+const ar=document.querySelector('#ar');
+let viewer=null;
+
+function setStatus(t){status.textContent=t}
+function fail(e){
+ console.error(e);
+ setStatus('ERROR:\\n'+(e?.stack || e?.message || e));
+ view3d.disabled=false; ar.disabled=false;
+}
+
+async function loadViewer(webxr=false){
+ view3d.disabled=true; ar.disabled=true;
+ progress.style.display='block'; bar.style.width='10%';
+ setStatus('Descargando Ccta.splat…');
+ const response=await fetch(MODEL,{cache:'no-store'});
+ if(!response.ok) throw new Error('No se pudo descargar '+MODEL+' (HTTP '+response.status+').');
+ const total=Number(response.headers.get('content-length')||0);
+ let received=0;
+ const reader=response.body?.getReader();
+ let blob;
+ if(reader){
+   const chunks=[];
+   while(true){
+     const {done,value}=await reader.read();
+     if(done) break;
+     chunks.push(value); received+=value.length;
+     if(total) bar.style.width=Math.min(85,10+received/total*75)+'%';
+   }
+   blob=new Blob(chunks);
+ }else{
+   blob=await response.blob();
+ }
+ const url=URL.createObjectURL(blob);
+ bar.style.width='88%'; setStatus('Inicializando renderer…');
+
+ viewer=new GaussianSplats3D.Viewer({
+   webXRMode:webxr ? GaussianSplats3D.WebXRMode.AR : GaussianSplats3D.WebXRMode.None,
+   webXRSessionInit:webxr ? {requiredFeatures:['hit-test'],optionalFeatures:['local-floor','dom-overlay']} : {},
+   gpuAcceleratedSort:false,
+   integerBasedSort:false,
+   sharedMemoryForWorkers:false,
+   halfPrecisionCovariancesOnGPU:true,
+   sphericalHarmonicsDegree:0,
+   sceneRevealMode:GaussianSplats3D.SceneRevealMode.Instant,
+   showLoadingUI:true,
+   initialCameraPosition:[0,0,2],
+   initialCameraLookAt:[0,0,0]
+ });
+ await viewer.addSplatScene(url,{
+   format:GaussianSplats3D.SceneFormat.Splat,
+   showLoadingUI:true,
+   progressiveLoad:false,
+   splatAlphaRemovalThreshold:1,
+   position:[0,0,0],
+   rotation:[0,0,0,1],
+   scale:[1,1,1]
+ });
+ URL.revokeObjectURL(url);
+ bar.style.width='100%';
+ setStatus(webxr?'Entrando en AR…':'Modelo cargado correctamente.');
+ panel.style.display='none'; document.querySelector('#help').style.display=webxr?'none':'block';
+ viewer.start();
+}
+
+view3d.onclick=()=>loadViewer(false).catch(fail);
+ar.onclick=async()=>{
+ if(!navigator.xr){setStatus('WebXR no está disponible en este navegador.');return}
+ const ok=await navigator.xr.isSessionSupported('immersive-ar').catch(()=>false);
+ if(!ok){setStatus('Este dispositivo no ofrece immersive-ar. Prueba Chrome en Android compatible con ARCore y HTTPS.');return}
+ loadViewer(true).catch(fail);
+};
+</script>
+</body>
+</html>
