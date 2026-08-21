@@ -33,7 +33,6 @@ button.secondary{background:#202c46;color:#fff}.status{margin-top:14px;font-size
  "@mkkellogg/gaussian-splats-3d":"https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
 }}
 </script>
-
 <script type="module">
 import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
 
@@ -49,34 +48,14 @@ let viewer=null;
 function setStatus(t){status.textContent=t}
 function fail(e){
  console.error(e);
- setStatus('ERROR:\\n'+(e?.stack || e?.message || e));
+ setStatus('ERROR:\n'+(e?.stack || e?.message || e));
  view3d.disabled=false; ar.disabled=false;
 }
 
 async function loadViewer(webxr=false){
  view3d.disabled=true; ar.disabled=true;
- progress.style.display='block'; bar.style.width='10%';
- setStatus('Descargando Ccta.splat…');
- const response=await fetch(MODEL,{cache:'no-store'});
- if(!response.ok) throw new Error('No se pudo descargar '+MODEL+' (HTTP '+response.status+').');
- const total=Number(response.headers.get('content-length')||0);
- let received=0;
- const reader=response.body?.getReader();
- let blob;
- if(reader){
-   const chunks=[];
-   while(true){
-     const {done,value}=await reader.read();
-     if(done) break;
-     chunks.push(value); received+=value.length;
-     if(total) bar.style.width=Math.min(85,10+received/total*75)+'%';
-   }
-   blob=new Blob(chunks);
- }else{
-   blob=await response.blob();
- }
- const url=URL.createObjectURL(blob);
- bar.style.width='88%'; setStatus('Inicializando renderer…');
+ progress.style.display='block'; bar.style.width='30%';
+ setStatus('Cargando Ccta.splat…');
 
  viewer=new GaussianSplats3D.Viewer({
    webXRMode:webxr ? GaussianSplats3D.WebXRMode.AR : GaussianSplats3D.WebXRMode.None,
@@ -92,7 +71,10 @@ async function loadViewer(webxr=false){
    initialCameraPosition:[0,0,2],
    initialCameraLookAt:[0,0,0]
  });
- await viewer.addSplatScene(url,{
+
+ bar.style.width='60%';
+
+ await viewer.addSplatScene(MODEL,{
    format:GaussianSplats3D.SceneFormat.Splat,
    showLoadingUI:true,
    progressiveLoad:false,
@@ -101,7 +83,7 @@ async function loadViewer(webxr=false){
    rotation:[0,0,0,1],
    scale:[1,1,1]
  });
- URL.revokeObjectURL(url);
+
  bar.style.width='100%';
  setStatus(webxr?'Entrando en AR…':'Modelo cargado correctamente.');
  panel.style.display='none'; document.querySelector('#help').style.display=webxr?'none':'block';
@@ -116,5 +98,6 @@ ar.onclick=async()=>{
  loadViewer(true).catch(fail);
 };
 </script>
+
 </body>
 </html>
