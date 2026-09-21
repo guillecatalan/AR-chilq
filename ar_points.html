@@ -39,7 +39,7 @@
 
     // Ajusta si la nube aparece muy grande/chica al colocarla.
     const PLACEMENT_SCALE = 1;
-    const POINT_SIZE = 0.035; // metros aprox., ajustar según densidad real
+    const POINT_SIZE = 3; // metros aprox., ajustar según densidad real
 
     // Misma corrección de ejes que usa internamente el SDK de LCC (Z-up -> Y-up)
     const axisFix = new THREE.Matrix4(-1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1);
@@ -103,7 +103,7 @@
         const material = new THREE.PointsMaterial({
           size: POINT_SIZE,
           vertexColors: true,
-          sizeAttenuation: true
+          sizeAttenuation: false
         });
         const points = new THREE.Points(geometry, material);
         modelGroup.add(points);
