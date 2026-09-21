@@ -37,7 +37,7 @@
             // ==================== Configuration ====================
 
             /** Set to true to show FPS / performance stats overlay and VR HUD */
-            const ENABLE_STATS = true;
+            const ENABLE_STATS = false;
 
             // ==================== Init ====================
 
@@ -81,7 +81,7 @@
             let locomotion = null;
             if (isVRDevice) {
                 locomotion = new XRLocomotion(renderer, camera, scene, {
-                    device: 'avp',
+                    device: 'quest',
                     moveSpeed: 2,
                     teleport: false,
                     fixedHeight: true
