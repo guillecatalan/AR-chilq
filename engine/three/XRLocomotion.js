@@ -1,259 +1,836 @@
 import * as THREE from 'three';
 
 /**
- * XR Locomotion Controller
+ * XRLocomotion
  *
- * Multi-device VR locomotion solution:
- * - quest/pico: Thumbstick continuous movement + snap/smooth rotation
- * - avp: Pinch select gaze-direction movement / teleport
- * - generic: Select-hold gaze movement (universal fallback)
+ * Locomoción para Meta Quest / Pico / WebXR.
  *
- * Usage:
- *   const locomotion = new XRLocomotion(renderer, camera, scene, {
- *       device: 'quest',       // 'quest' | 'pico' | 'avp' | 'generic'
- *       moveSpeed: 3,          // Movement speed (m/s)
- *       rotateSpeed: 1.5,      // Rotation speed (smooth rotation only)
- *       snapAngle: 45,         // Snap turn angle (degrees)
- *       rotateMode: 'snap',    // 'snap' | 'smooth'
- *       deadzone: 0.15,        // Thumbstick deadzone
- *       teleport: false,       // AVP teleport mode
- *       fixedHeight: true,     // Lock Y-axis (horizontal movement only)
- *   });
+ * Joystick izquierdo:
+ *   - Movimiento horizontal.
  *
- *   // In the animation loop
- *   renderer.setAnimationLoop((time, frame) => {
- *       locomotion.update(time, frame);
- *       renderer.render(scene, camera);
- *   });
+ * Joystick derecho:
+ *   - Rotación.
+ *
+ * El tracking de cabeza NO se modifica manualmente.
+ * WebXR / Three.js mantiene la orientación real del headset.
  */
-class XRLocomotion {
+export class XRLocomotion {
+
     constructor(renderer, camera, scene, options = {}) {
+
         this.renderer = renderer;
         this.camera = camera;
         this.scene = scene;
 
-        // Configuration
-        this.device = options.device || 'generic';
-        this.moveSpeed = options.moveSpeed ?? 3;
+        this.device = options.device || 'quest';
+
+        this.moveSpeed = options.moveSpeed ?? 2.0;
         this.rotateSpeed = options.rotateSpeed ?? 1.5;
+
+        this.rotateMode = options.rotateMode || 'smooth';
         this.snapAngle = options.snapAngle ?? 45;
-        this.rotateMode = options.rotateMode || 'snap';
-        this.deadzone = options.deadzone ?? 0.15;
+
+        this.deadzone = options.deadzone ?? 0.18;
+
         this.teleport = options.teleport ?? false;
+
         this.fixedHeight = options.fixedHeight ?? true;
 
-        // Camera Rig
-        this.cameraRig = new THREE.Group();
-        this.cameraRig.add(camera);
-        scene.add(this.cameraRig);
+        /*
+         * En Meta Quest normalmente:
+         *
+         * axes[2] = X del joystick
+         * axes[3] = Y del joystick
+         *
+         * Si ese par no existe se utiliza [0,1].
+         */
+        this.stickAxes = options.stickAxes || [2, 3];
 
-        // Internal state
-        this._prevTime = performance.now();
-        this._snapReady = true; // Prevent snap turn from firing continuously
+        this.debugInput = options.debugInput ?? false;
+
+        // ========================================================
+        // RIG XR
+        // ========================================================
+
+        this.cameraRig = new THREE.Group();
+
+        this.cameraRig.name = 'XRLocomotionRig';
+
+        this.cameraRig.add(this.camera);
+
+        this.scene.add(this.cameraRig);
+
+        // ========================================================
+        // ESTADO
+        // ========================================================
+
+        this._prevTime = null;
+
+        this._snapReady = true;
+
         this._selecting = false;
+
         this._teleportTarget = null;
-        this._raycaster = new THREE.Raycaster();
-        this._tempMatrix = new THREE.Matrix4();
+
+        // ========================================================
+        // VECTORES AUXILIARES
+        // ========================================================
+
         this._direction = new THREE.Vector3();
 
-        // Teleport marker
-        this._marker = null;
-        this._floorMeshes = [];
+        this._right = new THREE.Vector3();
 
-        // Controllers
-        this._controllers = [];
+        this._forward = new THREE.Vector3();
+
+        // ========================================================
+        // CONTROLLERS
+        // ========================================================
+
+        this.controllers = [];
+
+        this._lastDebugTime = 0;
+
         this._setupControllers();
     }
 
-    // ─── Public API ─────────────────────────────────────────
 
-    /**
-     * Call every frame to process movement and rotation logic.
-     */
+    // ============================================================
+    // UPDATE
+    // ============================================================
+
     update(time, frame) {
-        if (!this.renderer.xr.isPresenting) return;
 
-        const now = performance.now();
-        const delta = (now - this._prevTime) / 1000; // 秒
-        this._prevTime = now;
+        if (!this.renderer.xr.isPresenting) {
 
-        switch (this.device) {
-            case 'quest':
-            case 'pico':
-                this._updateThumbstick(delta);
-                break;
-            case 'avp':
-                if (this.teleport) {
-                    this._updateTeleport();
-                } else {
-                    this._updateGazeMove(delta);
-                }
-                break;
-            case 'generic':
-            default:
-                this._updateSelectMove(delta);
-                break;
+            this._prevTime = time;
+
+            return;
+        }
+
+
+        if (this._prevTime === null) {
+
+            this._prevTime = time;
+
+            return;
+        }
+
+
+        /*
+         * Limitamos delta para evitar saltos si el navegador
+         * se queda momentáneamente bloqueado.
+         */
+        const delta = Math.min(
+            (time - this._prevTime) / 1000,
+            0.05
+        );
+
+
+        this._prevTime = time;
+
+
+        // ========================================================
+        // QUEST / PICO
+        // ========================================================
+
+        if (
+            this.device === 'quest' ||
+            this.device === 'pico'
+        ) {
+
+            this._updateThumbstick(delta);
+
+        } else {
+
+            this._updateSelectMove(delta);
+        }
+
+
+        // ========================================================
+        // TELEPORT
+        // ========================================================
+
+        if (this.teleport) {
+
+            this._updateTeleport();
         }
     }
 
-    /**
-     * Set floor meshes for teleport raycasting (teleport mode only).
-     */
-    setFloorMeshes(meshes) {
-        this._floorMeshes = Array.isArray(meshes) ? meshes : [meshes];
+
+    // ============================================================
+    // CONTROLLERS
+    // ============================================================
+
+    _setupControllers() {
+
+        const controller0 =
+            this.renderer.xr.getController(0);
+
+        const controller1 =
+            this.renderer.xr.getController(1);
+
+
+        this.controllers = [
+            controller0,
+            controller1
+        ];
+
+
+        /*
+         * Escuchamos ambos controladores.
+         */
+        for (const controller of this.controllers) {
+
+            controller.addEventListener(
+                'selectstart',
+                () => {
+
+                    this._selecting = true;
+                }
+            );
+
+
+            controller.addEventListener(
+                'selectend',
+                () => {
+
+                    this._selecting = false;
+                }
+            );
+
+
+            this.scene.add(controller);
+        }
     }
 
-    /**
-     * Get the camera rig group for external position control.
-     */
+
+    // ============================================================
+    // LEER JOYSTICK
+    // ============================================================
+
+    _readThumbstick(gamepad) {
+
+        if (
+            !gamepad ||
+            !gamepad.axes
+        ) {
+
+            return {
+                x: 0,
+                y: 0,
+                axes: null
+            };
+        }
+
+
+        const axes = gamepad.axes;
+
+
+        let xIndex =
+            this.stickAxes[0];
+
+        let yIndex =
+            this.stickAxes[1];
+
+
+        /*
+         * Si Quest entrega axes[2]/axes[3],
+         * los usamos.
+         *
+         * Si no existen, usamos axes[0]/axes[1].
+         */
+        if (
+            axes.length <= Math.max(
+                xIndex,
+                yIndex
+            )
+        ) {
+
+            xIndex = 0;
+
+            yIndex = 1;
+        }
+
+
+        return {
+
+            x: Number.isFinite(
+                axes[xIndex]
+            )
+                ? axes[xIndex]
+                : 0,
+
+            y: Number.isFinite(
+                axes[yIndex]
+            )
+                ? axes[yIndex]
+                : 0,
+
+            axes: [
+                xIndex,
+                yIndex
+            ]
+        };
+    }
+
+
+    // ============================================================
+    // DEADZONE
+    // ============================================================
+
+    _applyDeadzone(value) {
+
+        const absolute =
+            Math.abs(value);
+
+
+        if (
+            absolute <
+            this.deadzone
+        ) {
+
+            return 0;
+        }
+
+
+        const sign =
+            Math.sign(value);
+
+
+        const normalized =
+            (
+                absolute -
+                this.deadzone
+            ) /
+            (
+                1 -
+                this.deadzone
+            );
+
+
+        return sign *
+            Math.min(
+                normalized,
+                1
+            );
+    }
+
+
+    // ============================================================
+    // JOYSTICKS
+    // ============================================================
+
+    _updateThumbstick(delta) {
+
+        const session =
+            this.renderer.xr.getSession();
+
+
+        if (!session) {
+
+            return;
+        }
+
+
+        for (
+            const source
+            of session.inputSources
+        ) {
+
+            if (!source.gamepad) {
+
+                continue;
+            }
+
+
+            const gamepad =
+                source.gamepad;
+
+
+            const handedness =
+                source.handedness;
+
+
+            const stick =
+                this._readThumbstick(
+                    gamepad
+                );
+
+
+            const x =
+                this._applyDeadzone(
+                    stick.x
+                );
+
+
+            const y =
+                this._applyDeadzone(
+                    stick.y
+                );
+
+
+            // ====================================================
+            // DEBUG
+            // ====================================================
+
+            if (
+                this.debugInput
+            ) {
+
+                this._debugInput(
+                    source,
+                    stick,
+                    x,
+                    y
+                );
+            }
+
+
+            // ====================================================
+            // JOYSTICK IZQUIERDO
+            // MOVIMIENTO
+            // ====================================================
+
+            if (
+                handedness === 'left'
+            ) {
+
+                if (
+                    Math.abs(x) < 0.001 &&
+                    Math.abs(y) < 0.001
+                ) {
+
+                    continue;
+                }
+
+
+                /*
+                 * Obtenemos la cámara XR real.
+                 *
+                 * Esto es importante:
+                 * no intentamos simular el movimiento
+                 * de la cabeza.
+                 */
+                const xrCamera =
+                    this.renderer.xr.getCamera(
+                        this.camera
+                    );
+
+
+                /*
+                 * Dirección de mirada.
+                 */
+                xrCamera.getWorldDirection(
+                    this._forward
+                );
+
+
+                /*
+                 * Solo movimiento horizontal.
+                 */
+                this._forward.y = 0;
+
+
+                if (
+                    this._forward.lengthSq() <
+                    0.0001
+                ) {
+
+                    this._forward.set(
+                        0,
+                        0,
+                        -1
+                    );
+
+                } else {
+
+                    this._forward.normalize();
+                }
+
+
+                /*
+                 * Vector lateral.
+                 */
+                this._right.crossVectors(
+                    this._forward,
+                    this.camera.up
+                );
+
+
+                if (
+                    this._right.lengthSq() <
+                    0.0001
+                ) {
+
+                    this._right.set(
+                        1,
+                        0,
+                        0
+                    );
+
+                } else {
+
+                    this._right.normalize();
+                }
+
+
+                /*
+                 * Construimos dirección:
+                 *
+                 * joystick Y
+                 * joystick X
+                 */
+                this._direction.set(
+                    0,
+                    0,
+                    0
+                );
+
+
+                this._direction.addScaledVector(
+                    this._forward,
+                    -y
+                );
+
+
+                this._direction.addScaledVector(
+                    this._right,
+                    x
+                );
+
+
+                this._direction.y = 0;
+
+
+                if (
+                    this._direction.lengthSq() >
+                    0.0001
+                ) {
+
+                    this._direction.normalize();
+
+
+                    const distance =
+                        this.moveSpeed *
+                        delta;
+
+
+                    this.cameraRig.position
+                        .addScaledVector(
+                            this._direction,
+                            distance
+                        );
+                }
+            }
+
+
+            // ====================================================
+            // JOYSTICK DERECHO
+            // ROTACIÓN
+            // ====================================================
+
+            if (
+                handedness === 'right'
+            ) {
+
+                if (
+                    Math.abs(x) < 0.001
+                ) {
+
+                    continue;
+                }
+
+
+                // ==================================================
+                // ROTACIÓN SNAP
+                // ==================================================
+
+                if (
+                    this.rotateMode === 'snap'
+                ) {
+
+                    this._updateSnapRotation(
+                        x
+                    );
+
+                }
+
+                // ==================================================
+                // ROTACIÓN SUAVE
+                // ==================================================
+
+                else {
+
+                    this.cameraRig.rotation.y -=
+                        x *
+                        this.rotateSpeed *
+                        delta;
+                }
+            }
+        }
+    }
+
+
+    // ============================================================
+    // SNAP ROTATION
+    // ============================================================
+
+    _updateSnapRotation(x) {
+
+        const threshold = 0.7;
+
+
+        if (
+            Math.abs(x) >
+            threshold &&
+            this._snapReady
+        ) {
+
+            const angle =
+                THREE.MathUtils.degToRad(
+                    this.snapAngle
+                ) *
+                Math.sign(x);
+
+
+            this.cameraRig.rotation.y -=
+                angle;
+
+
+            this._snapReady = false;
+        }
+
+
+        /*
+         * Rearmar cuando el joystick
+         * vuelve al centro.
+         */
+        if (
+            Math.abs(x) < 0.3
+        ) {
+
+            this._snapReady = true;
+        }
+    }
+
+
+    // ============================================================
+    // MOVIMIENTO POR MIRADA
+    // ============================================================
+
+    _updateGazeMove(delta) {
+
+        const xrCamera =
+            this.renderer.xr.getCamera(
+                this.camera
+            );
+
+
+        xrCamera.getWorldDirection(
+            this._direction
+        );
+
+
+        this._direction.y = 0;
+
+
+        if (
+            this._direction.lengthSq() <
+            0.0001
+        ) {
+
+            return;
+        }
+
+
+        this._direction.normalize();
+
+
+        this.cameraRig.position
+            .addScaledVector(
+                this._direction,
+                this.moveSpeed *
+                delta
+            );
+    }
+
+
+    // ============================================================
+    // SELECT MOVE
+    // ============================================================
+
+    _updateSelectMove(delta) {
+
+        if (
+            this._selecting
+        ) {
+
+            this._updateGazeMove(
+                delta
+            );
+        }
+    }
+
+
+    // ============================================================
+    // TELEPORT
+    // ============================================================
+
+    _updateTeleport() {
+
+        if (
+            !this._teleportTarget
+        ) {
+
+            return;
+        }
+
+
+        this.cameraRig.position.copy(
+            this._teleportTarget
+        );
+
+
+        this._teleportTarget = null;
+    }
+
+
+    teleportTo(position) {
+
+        this._teleportTarget =
+            position.clone();
+    }
+
+
+    // ============================================================
+    // DEBUG
+    // ============================================================
+
+    _debugInput(
+        source,
+        stick,
+        processedX,
+        processedY
+    ) {
+
+        const now =
+            performance.now();
+
+
+        /*
+         * Evita llenar la consola.
+         */
+        if (
+            now -
+            this._lastDebugTime <
+            250
+        ) {
+
+            return;
+        }
+
+
+        this._lastDebugTime =
+            now;
+
+
+        console.log(
+            '[XR INPUT]',
+            {
+
+                handedness:
+                    source.handedness,
+
+                profiles:
+                    source.profiles,
+
+                axes:
+                    source.gamepad?.axes
+                        ? Array.from(
+                            source.gamepad.axes
+                        )
+                        : [],
+
+                stickAxes:
+                    stick.axes,
+
+                stickX:
+                    processedX,
+
+                stickY:
+                    processedY,
+
+                buttons:
+                    source.gamepad?.buttons
+                        ? Array.from(
+                            source.gamepad.buttons
+                        ).map(
+                            b => ({
+                                pressed:
+                                    b.pressed,
+
+                                touched:
+                                    b.touched,
+
+                                value:
+                                    b.value
+                            })
+                        )
+                        : []
+            }
+        );
+    }
+
+
+    // ============================================================
+    // API
+    // ============================================================
+
     getRig() {
+
         return this.cameraRig;
     }
 
-    /**
-     * Manually set rig position (teleport to coordinates).
-     */
-    teleportTo(position) {
-        this.cameraRig.position.copy(position);
-    }
 
-    /**
-     * Dispose: remove controllers and event listeners.
-     */
+    // ============================================================
+    // DISPOSE
+    // ============================================================
+
     dispose() {
-        for (const ctrl of this._controllers) {
-            this.scene.remove(ctrl);
-        }
-        if (this._marker) {
-            this.scene.remove(this._marker);
-        }
-    }
 
-    // ─── Internal Methods ─────────────────────────────────────────
+        for (
+            const controller
+            of this.controllers
+        ) {
 
-    _setupControllers() {
-        const controller0 = this.renderer.xr.getController(0);
-        const controller1 = this.renderer.xr.getController(1);
-
-        controller0.addEventListener('selectstart', () => {
-            this._selecting = true;
-        });
-        controller0.addEventListener('selectend', () => {
-            this._selecting = false;
-            if (this.teleport && this._teleportTarget) {
-                this.teleportTo(this._teleportTarget);
-                this._teleportTarget = null;
-            }
-        });
-
-        this.scene.add(controller0);
-        this.scene.add(controller1);
-        this._controllers = [controller0, controller1];
-
-        // Teleport marker for floor indication
-        if (this.teleport || this.device === 'avp') {
-            this._marker = new THREE.Mesh(
-                new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
-                new THREE.MeshBasicMaterial({ color: 0x00ff88, opacity: 0.7, transparent: true })
+            this.scene.remove(
+                controller
             );
-            this._marker.visible = false;
-            this.scene.add(this._marker);
         }
-    }
 
-    /**
-     * Quest/Pico: Thumbstick continuous movement + snap/smooth rotation
-     */
-    _updateThumbstick(delta) {
-        const session = this.renderer.xr.getSession();
-        if (!session) return;
 
-        for (const source of session.inputSources) {
-            if (!source.gamepad) continue;
+        this.controllers = [];
 
-            const axes = source.gamepad.axes;
-            // Typically: axes[2] = X (left/right), axes[3] = Y (forward/back)
 
-            if (source.handedness === 'left') {
-                // Left thumbstick: movement
-                const x = Math.abs(axes[2]) > this.deadzone ? axes[2] : 0;
-                const z = Math.abs(axes[3]) > this.deadzone ? axes[3] : 0;
+        if (
+            this.camera.parent ===
+            this.cameraRig
+        ) {
 
-                if (x !== 0 || z !== 0) {
-                    this._direction.set(x, 0, z);
-                    this._direction.applyQuaternion(this.camera.quaternion);
-                    if (this.fixedHeight) this._direction.y = 0;
-                    this._direction.normalize();
-                    this.cameraRig.position.addScaledVector(this._direction, this.moveSpeed * delta);
-                }
-            }
-
-            if (source.handedness === 'right') {
-                // Right thumbstick: rotation
-                const rotX = Math.abs(axes[2]) > this.deadzone ? axes[2] : 0;
-
-                if (this.rotateMode === 'snap') {
-                    if (Math.abs(rotX) > 0.7 && this._snapReady) {
-                        const angle = -Math.sign(rotX) * THREE.MathUtils.degToRad(this.snapAngle);
-                        this.cameraRig.rotateY(angle);
-                        this._snapReady = false;
-                    } else if (Math.abs(rotX) < 0.3) {
-                        this._snapReady = true;
-                    }
-                } else {
-                    // smooth rotation
-                    if (rotX !== 0) {
-                        this.cameraRig.rotateY(-rotX * this.rotateSpeed * delta);
-                    }
-                }
-            }
+            this.cameraRig.remove(
+                this.camera
+            );
         }
-    }
 
-    /**
-     * AVP (non-teleport): Pinch select to move along gaze direction
-     */
-    _updateGazeMove(delta) {
-        if (!this._selecting) return;
 
-        this._direction.set(0, 0, -1);
-        this._direction.applyQuaternion(this.camera.quaternion);
-        if (this.fixedHeight) this._direction.y = 0;
-        this._direction.normalize();
-        this.cameraRig.position.addScaledVector(this._direction, this.moveSpeed * delta);
-    }
+        if (
+            this.cameraRig.parent ===
+            this.scene
+        ) {
 
-    /**
-     * AVP (teleport): Point at floor to teleport
-     */
-    _updateTeleport() {
-        const controller = this._controllers[0];
-        if (!controller) return;
-
-        this._tempMatrix.identity().extractRotation(controller.matrixWorld);
-        this._raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
-        this._raycaster.ray.direction.set(0, 0, -1).applyMatrix4(this._tempMatrix);
-
-        const intersects = this._raycaster.intersectObjects(this._floorMeshes);
-
-        if (intersects.length > 0 && this._selecting) {
-            this._teleportTarget = intersects[0].point.clone();
-            if (this._marker) {
-                this._marker.position.copy(this._teleportTarget);
-                this._marker.visible = true;
-            }
-        } else {
-            this._teleportTarget = null;
-            if (this._marker) this._marker.visible = false;
+            this.scene.remove(
+                this.cameraRig
+            );
         }
-    }
-
-    /**
-     * Generic: Select-hold to move along gaze direction
-     */
-    _updateSelectMove(delta) {
-        this._updateGazeMove(delta);
     }
 }
-
-export { XRLocomotion };
