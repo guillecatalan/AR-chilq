@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>LCC ThreeJS XR Demo</title>
+    </head>
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+        }
+    </style>
+
+    <body>
+        <script type="importmap">
+            {
+                "imports": {
+                    "three": "./engine/three/three.module.js",
+                    "three/addons/": "./engine/three/jsm/"
+                }
+            }
+        </script>
+        <script type="module">
+            import * as THREE from 'three';
+            import { VRButton } from 'three/addons/webxr/VRButton.js';
+            import { LCCRender } from './sdk/lcc-sdk-three.js';
+            import { XRLocomotion } from './engine/three/XRLocomotion.js';
+
+            // ==================== Configuration ====================
+
+            /** Set to true to show FPS / performance stats overlay and VR HUD */
+            const ENABLE_STATS = true;
+
+            // ==================== Init ====================
+
+            let isVRDevice = false;
+            try {
+                if (navigator.xr) {
+                    isVRDevice = await navigator.xr.isSessionSupported('immersive-vr');
+                }
+            } catch (e) {
+                console.warn('[XR] VR support check failed:', e);
+            }
+            console.warn('isVRDevice: ', isVRDevice);
+
+            // Extract data path from URL ?data=xxx, fallback to default path
+            const dataParam = new URLSearchParams(location.search).get('data');
+            const dataPath = dataParam || `${location.origin}/assets/caixin_lcc2/meta.lcc2`;
+
+            const scene = new THREE.Scene();
+
+            const renderer = new THREE.WebGLRenderer({
+                // Your near/far range (0.1 → 150000) is ~1.5M:1, which is brutal on the
+                // default 24-bit depth buffer. On a dense splat cloud that shows up as
+                // flicker/sparkle ("tintineo") that gets worse the more you rotate your
+                // head, because overlapping splats get reordered inconsistently frame
+                // to frame. A log depth buffer fixes that at a small perf cost.
+                logarithmicDepthBuffer: true
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+
+            if (isVRDevice) {
+                renderer.xr.enabled = true;
+                renderer.xr.setReferenceSpaceType('local-floor');
+                // Fixed foveated rendering: renders the edges of each eye at lower res.
+                // Quest supports 0 (off) to 1 (max). This buys back GPU headroom, which
+                // helps the splat sorter/streamer keep up when you turn your head fast
+                // — that's usually what causes the little "jumps" (dropped/late frames).
+                renderer.xr.setFoveation(1);
+            }
+
+            renderer.setClearColor(0x000000);
+            document.body.appendChild(renderer.domElement);
+            if (isVRDevice) {
+                document.body.appendChild(VRButton.createButton(renderer));
+            }
+
+            const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 150000);
+            camera.position.set(0, 2, 0);
+
+            // ==================== XR Locomotion ====================
+            // AVP: pinch select to move continuously along gaze direction
+            // For Quest/Pico thumbstick mode, change device to 'quest' or 'pico'
+            let locomotion = null;
+            if (isVRDevice) {
+                locomotion = new XRLocomotion(renderer, camera, scene, {
+                    device: 'quest',
+                    moveSpeed: 2,
+                    teleport: false,
+                    fixedHeight: true
+                });
+            } else {
+                // Non-VR: camera added directly to scene
+                scene.add(camera);
+            }
+            // ==================== End Locomotion ====================
+
+            // ==================== Stats Panel ====================
+            let statsPanel = null;
+            if (ENABLE_STATS) {
+                const { StatsPanel } = await import('./engine/three/StatsPanel.js');
+                statsPanel = new StatsPanel(THREE, renderer, { xrHud: isVRDevice });
+                if (statsPanel.xrHudObject) {
+                    scene.add(statsPanel.xrHudObject);
+                }
+            }
+            // ==================== End Stats ====================
+
+            // Use the model matrix to change the model coordinate system
+            const modelMatrix = new THREE.Matrix4(-1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1);
+
+            // Loading lcc object
+            const lccObj = LCCRender.load(
+                {
+                    camera: camera,
+                    scene: scene,
+                    dataPath: dataPath,
+                    renderLib: THREE,
+                    canvas: renderer.domElement,
+                    renderer: renderer,
+                    useEnv: true,
+                    usePage: true,
+                    useIndexDB: true,
+                    useLoadingEffect: true,
+                    modelMatrix: modelMatrix,
+                    appKey: null
+                },
+                (mesh) => {
+                    console.log('Lcc object Loaded:  ', mesh);
+                },
+                (percent) => {
+                    console.log('Lcc object loading: ' + (percent * 100).toFixed(1) + '%');
+                },
+                () => {
+                    console.log('Lcc object loading failure');
+                }
+            );
+
+            // Configure performance parameters
+            // If the jitter/flicker happens specifically when you turn to look at an
+            // area you haven't looked at yet (vs. anywhere), it's likely the splat
+            // *streamer* hitching to load new nodes for the newly-visible region —
+            // not a rendering bug. Watch the FPS overlay (ENABLE_STATS) while you turn
+            // your head: a momentary FPS dip at the exact moment of the "jump" would
+            // confirm that. If so, these three numbers are your main levers — trade
+            // detail for smoothness by lowering them:
+            lccObj.setStartLod(0); // higher = coarser starting detail, less to load per node
+            lccObj.setMaxSplats(1000000); // lower = fewer splats resident at once
+            lccObj.setMaxNodeSplats(400000); // lower = cheaper per-node loads
+            lccObj.setMaxDistance(90); // lower = fewer far nodes streamed in
+
+            window.lccObj = lccObj;
+            window.LCCRender = LCCRender;
+            window.locomotion = locomotion; // debug: locomotion.getRig().position.set(x,y,z)
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            function animate() {
+                renderer.setAnimationLoop((time, frame) => {
+                    if (locomotion) locomotion.update(time, frame);
+                    LCCRender.update();
+                    renderer.render(scene, camera);
+
+                    // Update stats overlay
+                    if (statsPanel) {
+                        statsPanel.update();
+                    }
+                });
+            }
+
+            animate();
+        </script>
+    </body>
+</html>
