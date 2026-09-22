@@ -37,7 +37,7 @@
             // ==================== Configuration ====================
 
             /** Set to true to show FPS / performance stats overlay and VR HUD */
-            const ENABLE_STATS = true;
+            const ENABLE_STATS = false;
 
             // ==================== Init ====================
 
@@ -59,7 +59,7 @@
 
             const renderer = new THREE.WebGLRenderer();
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setPixelRatio(1);
 
             if (isVRDevice) {
                 renderer.xr.enabled = true;
@@ -72,7 +72,7 @@
                 document.body.appendChild(VRButton.createButton(renderer));
             }
 
-            const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 150000);
+            const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 300);
             camera.position.set(0, 2, 0);
 
             // ==================== XR Locomotion ====================
@@ -115,7 +115,7 @@
                     renderLib: THREE,
                     canvas: renderer.domElement,
                     renderer: renderer,
-                    useEnv: true,
+                    useEnv: false,
                     usePage: true,
                     useIndexDB: true,
                     useLoadingEffect: true,
@@ -134,10 +134,10 @@
             );
 
             // Configure performance parameters
-            lccObj.setStartLod(0);
-            lccObj.setMaxSplats(1000000);
-            lccObj.setMaxNodeSplats(400000);
-            lccObj.setMaxDistance(90);
+            lccObj.setStartLod(1);
+            lccObj.setMaxSplats(500000);
+            lccObj.setMaxNodeSplats(100000);
+            lccObj.setMaxDistance(60);
 
             window.lccObj = lccObj;
             window.LCCRender = LCCRender;
